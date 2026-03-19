@@ -8,11 +8,20 @@ venv/
 .env
 
 # Local app data (DO NOT COMMIT THESE)
+data/input/*
+!data/input/.gitkeep
 data/thumbs/
 data/chroma/
 
 # macOS
 .DS_Store
 
+# Raycast
+raycast/node_modules/
+raycast/.raycast/
+
 # Streamlit
 .streamlit/secrets.toml
+
+# Python tooling
+.pytest_cache/

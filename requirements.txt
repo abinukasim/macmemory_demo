@@ -1,0 +1,14 @@
+chromadb
+fastapi
+google-genai
+pillow
+pillow-heif
+pydantic-settings
+pypdf
+pytest
+python-dotenv
+typer
+uvicorn[standard]
+
+# System dependency for OCR, install separately:
+# brew install tesseract
