@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Local app data (DO NOT COMMIT THESE)
+data/thumbs/
+data/chroma/
+
+# macOS
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
