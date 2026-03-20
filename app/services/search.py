@@ -143,12 +143,14 @@ class SearchService:
                 best_by_file[file_id] = candidate
 
         ranked_hits = sorted(best_by_file.values(), key=lambda hit: hit.score, reverse=True)
-        return _diversify_hits(ranked_hits, limit)
+        return _diversify_hits(ranked_hits, query, limit)
 
 
 def _build_search_text(match: QueryMatch, metadata: dict[str, object]) -> str:
     fields = [
         str(metadata.get("filename", "")),
+        str(metadata.get("folder_context", "")),
+        str(metadata.get("folder_path", "")),
         str(metadata.get("preview_text", "")),
         str(metadata.get("image_caption", "")),
         str(metadata.get("image_tags", "")),
@@ -167,33 +169,31 @@ def _rerank_score(
     query_terms: list[str],
     query_phrase: str,
 ) -> float:
-    boost = 0.03 if modality == "image" else 0.0
     if not search_text or not query_terms:
-        return min(0.999, base_score + boost)
+        return base_score
 
     matched_terms = {term for term in query_terms if term in search_text}
     expanded_terms = _expand_query_terms(query_terms) - set(query_terms)
     matched_expanded_terms = {term for term in expanded_terms if term in search_text}
     if not matched_terms and not matched_expanded_terms:
-        return min(0.999, base_score + boost)
+        return base_score
 
     overlap_ratio = len(matched_terms) / len(query_terms)
     expanded_ratio = len(matched_expanded_terms) / max(len(expanded_terms), 1)
     phrase_match = bool(query_phrase and len(query_phrase) >= 3 and query_phrase in search_text)
 
+    boost = 0.0
     boost += 0.10 * overlap_ratio
     boost += 0.05 * expanded_ratio
     if phrase_match:
         boost += 0.08
 
     if modality == "image":
-        boost += 0.14
-        boost += 0.18 * overlap_ratio
-        boost += 0.12 * expanded_ratio
-        if matched_terms or matched_expanded_terms:
-            boost += 0.06
+        boost += 0.05
+        boost += 0.09 * overlap_ratio
+        boost += 0.07 * expanded_ratio
         if phrase_match:
-            boost += 0.10
+            boost += 0.04
 
     return min(0.999, base_score + boost)
 
@@ -209,19 +209,110 @@ def _expand_query_terms(query_terms: list[str]) -> set[str]:
     return expanded
 
 
-def _diversify_hits(hits: list[SearchHit], limit: int) -> list[SearchHit]:
+def _diversify_hits(hits: list[SearchHit], query: str, limit: int) -> list[SearchHit]:
     top_hits = hits[:limit]
     if len(top_hits) < limit or any(hit.modality == "image" for hit in top_hits):
-        return top_hits
+        return _rebalance_modalities(_second_stage_rerank(top_hits, query, limit), limit)
 
     image_candidates = [hit for hit in hits if hit.modality == "image"]
     if not image_candidates:
-        return top_hits
+        return _rebalance_modalities(_second_stage_rerank(top_hits, query, limit), limit)
 
     best_image = image_candidates[0]
     last_score = top_hits[-1].score
-    if best_image.score + 0.08 < last_score:
-        return top_hits
+    if best_image.score + 0.12 < last_score:
+        return _rebalance_modalities(_second_stage_rerank(top_hits, query, limit), limit)
 
     diversified = top_hits[:-1] + [best_image]
-    return sorted(diversified, key=lambda hit: hit.score, reverse=True)
+    diversified = sorted(diversified, key=lambda hit: hit.score, reverse=True)
+    return _rebalance_modalities(_second_stage_rerank(diversified, query, limit), limit)
+
+
+def _second_stage_rerank(hits: list[SearchHit], query: str, limit: int) -> list[SearchHit]:
+    if not hits:
+        return []
+
+    query_terms = _tokenize_query(query)
+    query_phrase = query.strip().lower()
+    reranked_hits: list[SearchHit] = []
+    for hit in hits[: max(limit * 4, limit)]:
+        second_stage_score = min(
+            0.999,
+            hit.score + _field_match_bonus(hit, query_terms, query_phrase),
+        )
+        reranked_hits.append(hit.model_copy(update={"score": second_stage_score}))
+    return sorted(reranked_hits, key=lambda hit: hit.score, reverse=True)[:limit]
+
+
+def _field_match_bonus(hit: SearchHit, query_terms: list[str], query_phrase: str) -> float:
+    if not query_terms:
+        return 0.0
+
+    metadata = hit.metadata
+    field_weights = {
+        "filename": 0.10,
+        "folder_context": 0.14,
+        "preview_text": 0.14,
+        "image_caption": 0.14,
+        "image_tags": 0.16,
+        "image_concepts": 0.12,
+        "ocr_text": 0.18,
+    }
+
+    bonus = 0.0
+    expanded_terms = _expand_query_terms(query_terms) - set(query_terms)
+    for field, weight in field_weights.items():
+        value = str(metadata.get(field, "")).lower()
+        if not value:
+            continue
+        matched_terms = {term for term in query_terms if term in value}
+        matched_expanded_terms = {term for term in expanded_terms if term in value}
+        if matched_terms:
+            bonus += weight * (len(matched_terms) / len(query_terms))
+        if matched_expanded_terms:
+            expansion_weight = 0.7 if hit.modality == "image" else 0.5
+            bonus += (weight * expansion_weight) * (len(matched_expanded_terms) / max(len(expanded_terms), 1))
+        if query_phrase and len(query_phrase) >= 3 and query_phrase in value:
+            bonus += weight * 0.4
+
+    if hit.modality == "image":
+        if str(metadata.get("folder_context", "")) and any(term in str(metadata.get("folder_context", "")).lower() for term in query_terms):
+            bonus += 0.005
+        if str(metadata.get("ocr_text", "")) and any(term in str(metadata.get("ocr_text", "")).lower() for term in query_terms):
+            bonus += 0.01
+
+    return bonus
+
+
+def _rebalance_modalities(hits: list[SearchHit], limit: int) -> list[SearchHit]:
+    if len(hits) <= 2:
+        return hits[:limit]
+
+    locked = hits[:1]
+    remaining = hits[len(locked) :]
+    selected = list(locked)
+    counts: dict[str, int] = {}
+    for hit in selected:
+        counts[hit.modality] = counts.get(hit.modality, 0) + 1
+
+    while remaining and len(selected) < limit:
+        best_index = 0
+        best_score = float("-inf")
+        for index, hit in enumerate(remaining):
+            penalty = 0.06 * counts.get(hit.modality, 0)
+            adjusted = hit.score - penalty
+            if adjusted > best_score:
+                best_score = adjusted
+                best_index = index
+        chosen = remaining.pop(best_index)
+        selected.append(chosen)
+        counts[chosen.modality] = counts.get(chosen.modality, 0) + 1
+
+    if not any(hit.modality == "image" for hit in selected):
+        image_candidates = [hit for hit in hits if hit.modality == "image"]
+        if image_candidates and selected:
+            best_image = image_candidates[0]
+            if best_image.score + 0.06 >= selected[-1].score:
+                selected[-1] = best_image
+
+    return selected[:limit]

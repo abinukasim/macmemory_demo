@@ -21,7 +21,9 @@ def test_indexing_and_search_flow_with_fake_embedder(tmp_path) -> None:
         settings.input_dir / "paper.pdf",
         "PDF semantic retrieval research and memory systems.",
     )
-    write_test_image(settings.input_dir / "sunset-beach.png")
+    image_dir = settings.input_dir / "travel" / "sunsets"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    write_test_image(image_dir / "sunset-beach.png")
 
     store = ChromaStore(settings)
     embedder = FakeEmbedder()
@@ -61,6 +63,8 @@ def test_indexing_and_search_flow_with_fake_embedder(tmp_path) -> None:
     assert image_metadata.get("image_caption") == "sunset beach"
     assert image_metadata.get("image_tags") == "sunset, beach"
     assert image_metadata.get("ocr_text") == "Sunset beach sign with opening hours"
+    assert image_metadata.get("folder_path") == "travel/sunsets"
+    assert image_metadata.get("folder_context") == "travel sunsets"
     assert any(document and "Caption:" in document for document, _ in image_rows)
     assert any(document and "Tags:" in document for document, _ in image_rows)
     assert any(document and "OCR:" in document for document, _ in image_rows)

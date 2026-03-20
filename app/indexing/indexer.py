@@ -67,7 +67,10 @@ class FolderIndexer:
             try:
                 modality = detect_modality(path)
                 if modality == "text":
-                    assets = self._embed_records(build_text_records(path, self.settings.thumbs_dir), title=path.name)
+                    assets = self._embed_records(
+                        build_text_records(path, self.settings.thumbs_dir, input_root=self.input_dir),
+                        title=path.name,
+                    )
                     text_chunks += len(assets)
                 elif modality == "pdf":
                     assets = self._embed_pdf(path)
@@ -80,6 +83,7 @@ class FolderIndexer:
                         self.settings.thumbs_dir,
                         description=description,
                         ocr_text=ocr_text,
+                        input_root=self.input_dir,
                     )
                     assets = self._embed_records(records, title=path.name)
                     image_files += 1
@@ -134,10 +138,13 @@ class FolderIndexer:
 
     def _embed_pdf(self, path: Path) -> list[IndexedAsset]:
         page_count = len(extract_pdf_pages(path))
-        chunk_assets = self._embed_records(build_pdf_records(path, self.settings.thumbs_dir), title=path.name)
+        chunk_assets = self._embed_records(
+            build_pdf_records(path, self.settings.thumbs_dir, input_root=self.input_dir),
+            title=path.name,
+        )
 
         if 0 < page_count <= 6:
-            record = build_pdf_direct_record(path, self.settings.thumbs_dir)
+            record = build_pdf_direct_record(path, self.settings.thumbs_dir, input_root=self.input_dir)
             try:
                 return [
                     IndexedAsset(

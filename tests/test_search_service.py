@@ -185,3 +185,110 @@ def test_search_service_diversifies_top_results_with_strong_image_candidate(tmp_
 
     assert len(response.hits) == 2
     assert any(hit.modality == "image" for hit in response.hits)
+
+
+def test_search_service_boosts_folder_context_in_second_stage_rerank(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    matches = [
+        QueryMatch(
+            id="pdf-file:chunk:0",
+            document="generic course notes and study planning",
+            metadata={
+                "file_id": "pdf-file",
+                "path": "/tmp/course-notes.pdf",
+                "filename": "course-notes.pdf",
+                "modality": "pdf",
+                "preview_text": "generic course notes and study planning",
+            },
+            distance=0.10,
+        ),
+        QueryMatch(
+            id="image-file",
+            document="Caption: outdoor market square\nTags: lights, crowd\nConcepts: travel and city scene",
+            metadata={
+                "file_id": "image-file",
+                "path": "/tmp/trips/vienna/market.jpeg",
+                "filename": "market.jpeg",
+                "modality": "image",
+                "preview_text": "outdoor market square",
+                "image_caption": "outdoor market square",
+                "folder_context": "trips vienna christmas market",
+                "folder_path": "trips/vienna/christmas-market",
+            },
+            distance=0.24,
+        ),
+    ]
+
+    service = SearchService(settings, store=FakeStore(matches), embedder=FakeEmbedder())
+    response = service.search(SearchRequest(query="vienna christmas market", k=5))
+
+    assert len(response.hits) == 2
+    assert response.hits[0].path == "/tmp/trips/vienna/market.jpeg"
+    assert response.hits[0].modality == "image"
+
+
+def test_search_service_rebalances_modalities_after_top_image_hits(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    matches = [
+        QueryMatch(
+            id="image-1",
+            document="Caption: christmas tree by fireplace\nTags: christmas, tree, fireplace\nConcepts: holiday celebration",
+            metadata={
+                "file_id": "image-1",
+                "path": "/tmp/christmas-tree.jpeg",
+                "filename": "christmas-tree.jpeg",
+                "modality": "image",
+                "preview_text": "christmas tree by fireplace",
+                "image_caption": "christmas tree by fireplace",
+                "image_tags": "christmas, tree, fireplace",
+            },
+            distance=0.08,
+        ),
+        QueryMatch(
+            id="image-2",
+            document="Caption: holiday lights in living room\nTags: holiday, lights, ornaments\nConcepts: holiday celebration",
+            metadata={
+                "file_id": "image-2",
+                "path": "/tmp/holiday-lights.jpeg",
+                "filename": "holiday-lights.jpeg",
+                "modality": "image",
+                "preview_text": "holiday lights in living room",
+                "image_caption": "holiday lights in living room",
+                "image_tags": "holiday, lights, ornaments",
+            },
+            distance=0.10,
+        ),
+        QueryMatch(
+            id="image-3",
+            document="Caption: festive market square\nTags: festive, winter, market\nConcepts: travel and city scene",
+            metadata={
+                "file_id": "image-3",
+                "path": "/tmp/festive-market.jpeg",
+                "filename": "festive-market.jpeg",
+                "modality": "image",
+                "preview_text": "festive market square",
+                "image_caption": "festive market square",
+                "image_tags": "festive, winter, market",
+            },
+            distance=0.12,
+        ),
+        QueryMatch(
+            id="pdf-1:chunk:0",
+            document="christmas planning checklist and holiday notes",
+            metadata={
+                "file_id": "pdf-1",
+                "path": "/tmp/checklist.pdf",
+                "filename": "checklist.pdf",
+                "modality": "pdf",
+                "preview_text": "christmas planning checklist and holiday notes",
+            },
+            distance=0.14,
+        ),
+    ]
+
+    service = SearchService(settings, store=FakeStore(matches), embedder=FakeEmbedder())
+    response = service.search(SearchRequest(query="christmas", k=3))
+
+    assert len(response.hits) == 3
+    assert response.hits[0].modality == "image"
+    assert any(hit.modality == "pdf" for hit in response.hits)

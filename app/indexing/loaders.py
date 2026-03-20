@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from pypdf import PdfReader
 
@@ -10,7 +11,7 @@ from app.utils.files import build_chunk_id, build_document_id, get_image_mime_ty
 from app.utils.images import create_quicklook_thumbnail, create_thumbnail
 
 
-def build_text_records(path: Path, thumbs_dir: Path | None = None) -> list[IndexRecord]:
+def build_text_records(path: Path, thumbs_dir: Path | None = None, input_root: Path | None = None) -> list[IndexRecord]:
     resolved_path = path.resolve()
     contents = path.read_text(encoding="utf-8", errors="ignore")
     file_id = build_document_id(path)
@@ -19,7 +20,7 @@ def build_text_records(path: Path, thumbs_dir: Path | None = None) -> list[Index
     chunks = chunk_text(contents)[:MAX_TEXT_CHUNKS_PER_FILE]
 
     for chunk_index, chunk in enumerate(chunks):
-        metadata = _base_metadata(path, file_id=file_id, modality="text", source_type="text")
+        metadata = _base_metadata(path, file_id=file_id, modality="text", source_type="text", input_root=input_root)
         metadata["chunk_index"] = chunk_index
         metadata["preview_text"] = _preview_text(chunk)
         metadata["truncated_for_indexing"] = len(chunks) == MAX_TEXT_CHUNKS_PER_FILE
@@ -39,7 +40,7 @@ def build_text_records(path: Path, thumbs_dir: Path | None = None) -> list[Index
     return records
 
 
-def build_pdf_records(path: Path, thumbs_dir: Path | None = None) -> list[IndexRecord]:
+def build_pdf_records(path: Path, thumbs_dir: Path | None = None, input_root: Path | None = None) -> list[IndexRecord]:
     resolved_path = path.resolve()
     pages = extract_pdf_pages(path)
     file_id = build_document_id(path)
@@ -54,7 +55,7 @@ def build_pdf_records(path: Path, thumbs_dir: Path | None = None) -> list[IndexR
         for chunk in chunk_text(page_text):
             if chunk_index >= MAX_PDF_CHUNKS_PER_FILE:
                 return records
-            metadata = _base_metadata(path, file_id=file_id, modality="pdf", source_type="pdf")
+            metadata = _base_metadata(path, file_id=file_id, modality="pdf", source_type="pdf", input_root=input_root)
             metadata["chunk_index"] = chunk_index
             metadata["page_number"] = page_number
             metadata["preview_text"] = _preview_text(chunk)
@@ -76,13 +77,13 @@ def build_pdf_records(path: Path, thumbs_dir: Path | None = None) -> list[IndexR
     return records
 
 
-def build_pdf_direct_record(path: Path, thumbs_dir: Path | None = None) -> IndexRecord:
+def build_pdf_direct_record(path: Path, thumbs_dir: Path | None = None, input_root: Path | None = None) -> IndexRecord:
     resolved_path = path.resolve()
     pages = extract_pdf_pages(path)
     preview_source = " ".join(text for _, text in pages if text).strip()
     file_id = build_document_id(path)
     thumbnail_path = create_quicklook_thumbnail(path, thumbs_dir) if thumbs_dir else None
-    metadata = _base_metadata(path, file_id=file_id, modality="pdf", source_type="pdf")
+    metadata = _base_metadata(path, file_id=file_id, modality="pdf", source_type="pdf", input_root=input_root)
     metadata["page_count"] = len(pages)
     metadata["embedding_mode"] = "native_pdf"
     metadata["preview_text"] = _preview_text(preview_source or path.stem)
@@ -99,11 +100,11 @@ def build_pdf_direct_record(path: Path, thumbs_dir: Path | None = None) -> Index
     )
 
 
-def build_image_record(path: Path, thumbs_dir: Path) -> IndexRecord:
+def build_image_record(path: Path, thumbs_dir: Path, input_root: Path | None = None) -> IndexRecord:
     resolved_path = path.resolve()
     file_id = build_document_id(path)
     thumbnail_path = create_thumbnail(path, thumbs_dir)
-    metadata = _base_metadata(path, file_id=file_id, modality="image", source_type="image")
+    metadata = _base_metadata(path, file_id=file_id, modality="image", source_type="image", input_root=input_root)
     metadata["thumbnail_path"] = str(thumbnail_path)
     metadata["mime_type"] = get_image_mime_type(path)
     metadata["preview_text"] = path.stem.replace("-", " ").replace("_", " ").strip() or path.name
@@ -124,8 +125,9 @@ def build_image_records(
     *,
     description: ImageDescription,
     ocr_text: str = "",
+    input_root: Path | None = None,
 ) -> list[IndexRecord]:
-    base_record = build_image_record(path, thumbs_dir)
+    base_record = build_image_record(path, thumbs_dir, input_root=input_root)
     base_record.metadata["preview_text"] = description.caption
     base_record.metadata["image_caption"] = description.caption
     base_record.metadata["image_tags"] = ", ".join(description.tags)
@@ -181,10 +183,17 @@ def extract_pdf_pages(path: Path) -> list[tuple[int, str]]:
     return pages
 
 
-def _base_metadata(path: Path, *, file_id: str, modality: str, source_type: str) -> dict[str, str | int | float | bool]:
+def _base_metadata(
+    path: Path,
+    *,
+    file_id: str,
+    modality: str,
+    source_type: str,
+    input_root: Path | None = None,
+) -> dict[str, str | int | float | bool]:
     resolved_path = path.resolve()
     stats = resolved_path.stat()
-    return {
+    metadata: dict[str, str | int | float | bool] = {
         "file_id": file_id,
         "path": str(resolved_path),
         "filename": resolved_path.name,
@@ -193,6 +202,12 @@ def _base_metadata(path: Path, *, file_id: str, modality: str, source_type: str)
         "file_size": int(stats.st_size),
         "mtime": float(stats.st_mtime),
     }
+    folder_path, folder_context = _folder_metadata(resolved_path, input_root)
+    if folder_path:
+        metadata["folder_path"] = folder_path
+    if folder_context:
+        metadata["folder_context"] = folder_context
+    return metadata
 
 
 def _preview_text(text: str, limit: int = 220) -> str:
@@ -211,3 +226,24 @@ def _copy_image_record(base_record: IndexRecord, *, record_id: str, document: st
         document=document,
         metadata=metadata,
     )
+
+
+def _folder_metadata(path: Path, input_root: Path | None) -> tuple[str, str]:
+    if input_root is None:
+        return "", ""
+
+    try:
+        relative_parent = path.resolve().parent.relative_to(input_root.resolve())
+    except ValueError:
+        return "", ""
+
+    if str(relative_parent) == ".":
+        return "", ""
+
+    folder_path = relative_parent.as_posix()
+    context_parts: list[str] = []
+    for part in relative_parent.parts:
+        tokens = re.findall(r"[a-z0-9]+", part.lower().replace("-", " ").replace("_", " "))
+        if tokens:
+            context_parts.append(" ".join(tokens))
+    return folder_path, " ".join(context_parts).strip()
