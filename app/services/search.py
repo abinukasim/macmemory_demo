@@ -148,14 +148,14 @@ class SearchService:
 
 def _build_search_text(match: QueryMatch, metadata: dict[str, object]) -> str:
     fields = [
-        str(metadata.get("filename", "")),
-        str(metadata.get("folder_context", "")),
-        str(metadata.get("folder_path", "")),
-        str(metadata.get("preview_text", "")),
-        str(metadata.get("image_caption", "")),
-        str(metadata.get("image_tags", "")),
-        str(metadata.get("image_concepts", "")),
-        str(metadata.get("ocr_text", "")),
+        _normalized_field_value("filename", metadata),
+        _normalized_field_value("folder_context", metadata),
+        _normalized_field_value("folder_path", metadata),
+        _normalized_field_value("preview_text", metadata),
+        _normalized_field_value("image_caption", metadata),
+        _normalized_field_value("image_tags", metadata),
+        _normalized_field_value("image_concepts", metadata),
+        _normalized_field_value("ocr_text", metadata),
         match.document or "",
     ]
     return " ".join(part for part in fields if part).lower()
@@ -261,25 +261,41 @@ def _field_match_bonus(hit: SearchHit, query_terms: list[str], query_phrase: str
 
     bonus = 0.0
     expanded_terms = _expand_query_terms(query_terms) - set(query_terms)
+    specific_match_found = False
     for field, weight in field_weights.items():
-        value = str(metadata.get(field, "")).lower()
+        value = _normalized_field_value(field, metadata).lower()
         if not value:
             continue
-        matched_terms = {term for term in query_terms if term in value}
-        matched_expanded_terms = {term for term in expanded_terms if term in value}
+        value_tokens = set(_tokenize_query(value))
+        matched_terms = set(query_terms) & value_tokens
+        matched_expanded_terms = expanded_terms & value_tokens
         if matched_terms:
             bonus += weight * (len(matched_terms) / len(query_terms))
+            if field != "image_concepts":
+                specific_match_found = True
         if matched_expanded_terms:
             expansion_weight = 0.7 if hit.modality == "image" else 0.5
             bonus += (weight * expansion_weight) * (len(matched_expanded_terms) / max(len(expanded_terms), 1))
+            if field != "image_concepts":
+                specific_match_found = True
         if query_phrase and len(query_phrase) >= 3 and query_phrase in value:
             bonus += weight * 0.4
+            if field != "image_concepts":
+                specific_match_found = True
 
     if hit.modality == "image":
-        if str(metadata.get("folder_context", "")) and any(term in str(metadata.get("folder_context", "")).lower() for term in query_terms):
+        folder_context = _normalized_field_value("folder_context", metadata)
+        ocr_text = _normalized_field_value("ocr_text", metadata)
+        folder_tokens = set(_tokenize_query(folder_context))
+        ocr_tokens = set(_tokenize_query(ocr_text))
+        if folder_context and (set(query_terms) & folder_tokens):
             bonus += 0.005
-        if str(metadata.get("ocr_text", "")) and any(term in str(metadata.get("ocr_text", "")).lower() for term in query_terms):
+        if ocr_text and (set(query_terms) & ocr_tokens):
             bonus += 0.01
+        if len(query_terms) >= 2 and not specific_match_found:
+            bonus -= 0.06
+        if str(metadata.get("embedding_kind", "")) == "ocr" and not ocr_text:
+            bonus -= 0.04
 
     return bonus
 
@@ -315,4 +331,20 @@ def _rebalance_modalities(hits: list[SearchHit], limit: int) -> list[SearchHit]:
             if best_image.score + 0.06 >= selected[-1].score:
                 selected[-1] = best_image
 
-    return selected[:limit]
+    return sorted(selected[:limit], key=lambda hit: hit.score, reverse=True)
+
+
+def _normalized_field_value(field: str, metadata: dict[str, object]) -> str:
+    value = str(metadata.get(field, "")).strip()
+    if field == "ocr_text" and value and _is_low_quality_ocr(value):
+        return ""
+    return value
+
+
+def _is_low_quality_ocr(text: str) -> bool:
+    tokens = re.findall(r"[a-zA-Z]+", text)
+    if len(tokens) < 6:
+        return True
+    long_tokens = [token for token in tokens if len(token) >= 4]
+    vowel_tokens = [token for token in tokens if re.search(r"[aeiouAEIOU]", token)]
+    return (len(long_tokens) / len(tokens) < 0.35) or (len(vowel_tokens) / len(tokens) < 0.55)

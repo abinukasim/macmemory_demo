@@ -292,3 +292,108 @@ def test_search_service_rebalances_modalities_after_top_image_hits(tmp_path) -> 
     assert len(response.hits) == 3
     assert response.hits[0].modality == "image"
     assert any(hit.modality == "pdf" for hit in response.hits)
+
+
+def test_search_service_returns_results_sorted_by_final_score(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    matches = [
+        QueryMatch(
+            id="pdf-1:chunk:0",
+            document="st mark church summary",
+            metadata={
+                "file_id": "pdf-1",
+                "path": "/tmp/church.pdf",
+                "filename": "church.pdf",
+                "modality": "pdf",
+                "preview_text": "st mark church summary",
+            },
+            distance=0.30,
+        ),
+        QueryMatch(
+            id="image-1",
+            document="Caption: st mark church square\nTags: church, square, zagreb\nConcepts: travel and architecture",
+            metadata={
+                "file_id": "image-1",
+                "path": "/tmp/stmarks.jpeg",
+                "filename": "stmarks.jpeg",
+                "modality": "image",
+                "preview_text": "st mark church square",
+                "image_caption": "st mark church square",
+                "image_tags": "church, square, zagreb",
+            },
+            distance=0.34,
+        ),
+    ]
+
+    service = SearchService(settings, store=FakeStore(matches), embedder=FakeEmbedder())
+    response = service.search(SearchRequest(query="st mark church", k=2))
+
+    assert len(response.hits) == 2
+    assert response.hits[0].score >= response.hits[1].score
+
+
+def test_search_service_penalizes_weak_image_semantic_match_without_field_support(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    matches = [
+        QueryMatch(
+            id="image-1",
+            document="Caption: golden temple by reflective pond\nTags: golden temple, pavilion, pond, reflection\nConcepts: architecture, nature, travel, culture, spirituality",
+            metadata={
+                "file_id": "image-1",
+                "path": "/tmp/temple.jpeg",
+                "filename": "temple.jpeg",
+                "modality": "image",
+                "preview_text": "golden temple by reflective pond",
+                "image_caption": "golden temple by reflective pond",
+                "image_tags": "golden temple, pavilion, pond, reflection",
+                "image_concepts": "architecture, nature, travel, culture, spirituality",
+            },
+            distance=0.30,
+        ),
+    ]
+
+    service = SearchService(settings, store=FakeStore(matches), embedder=FakeEmbedder())
+    response = service.search(SearchRequest(query="st mark church", k=1))
+
+    assert len(response.hits) == 1
+    assert 0.60 <= response.hits[0].score <= 0.67
+
+
+def test_search_service_does_not_treat_mark_as_market_token_match(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    matches = [
+        QueryMatch(
+            id="pdf-1:chunk:0",
+            document="The Mark Atlanta move out statement",
+            metadata={
+                "file_id": "pdf-1",
+                "path": "/tmp/the-mark.pdf",
+                "filename": "The Mark Atlanta Move-out Statement.pdf",
+                "modality": "pdf",
+                "preview_text": "The Mark Atlanta move out statement",
+            },
+            distance=0.18,
+        ),
+        QueryMatch(
+            id="image-1",
+            document="Caption: illuminated christmas market in front of city hall\nTags: christmas market, vienna, city hall\nConcepts: christmas, holiday season",
+            metadata={
+                "file_id": "image-1",
+                "path": "/tmp/market.jpeg",
+                "filename": "IMG_8451.HEIC",
+                "modality": "image",
+                "preview_text": "illuminated christmas market in front of city hall",
+                "image_caption": "illuminated christmas market in front of city hall",
+                "image_tags": "christmas market, vienna, city hall",
+                "image_concepts": "christmas, holiday season",
+            },
+            distance=0.20,
+        ),
+    ]
+
+    service = SearchService(settings, store=FakeStore(matches), embedder=FakeEmbedder())
+    response = service.search(SearchRequest(query="The Mark Atlanta", k=2))
+
+    assert len(response.hits) == 2
+    assert response.hits[0].path == "/tmp/the-mark.pdf"
+    assert response.hits[0].score > response.hits[1].score
