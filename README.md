@@ -134,6 +134,14 @@ Optional flags:
 ./.venv/bin/python -m compileall app tests
 ```
 
+### Inspect one indexed image
+
+Use this to see exactly what context is stored for an image file in the current index, including caption, tags, concepts, OCR text, folder context, and each indexed image record:
+
+```bash
+./.venv/bin/python -m app.cli.inspect_image_context "filename.ext"
+```
+
 ## Demo in 30 Seconds
 
 1. Put a few PDFs, notes, screenshots, and photos into `data/input`
