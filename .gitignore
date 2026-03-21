@@ -25,3 +25,6 @@ raycast/.raycast/
 
 # Python tooling
 .pytest_cache/
+
+# Internal planning log
+/roadmap.md
